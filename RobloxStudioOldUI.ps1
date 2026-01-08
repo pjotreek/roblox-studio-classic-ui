@@ -1,27 +1,9 @@
-param(
-    [switch]$Elevated
-)
+# RobloxStudioOldUI.ps1
+# Installer (must be run as Administrator). No self-elevation -> no loops.
 
 $ErrorActionPreference = "Stop"
 
-$LogPath = Join-Path $env:TEMP "RobloxStudioOldUI.log"
-
-function Log($msg) {
-    $line = ("[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $msg)
-    Add-Content -Path $LogPath -Value $line -Encoding UTF8
-}
-
-function Say($tag, $msg, $color="White") {
-    Write-Host "[$tag] $msg" -ForegroundColor $color
-    Log "[$tag] $msg"
-}
-
-function PauseExit {
-    Say "INFO" "Log: $LogPath" "DarkGray"
-    Write-Host ""
-    Write-Host "Press ENTER to close..." -ForegroundColor DarkGray
-    [void](Read-Host)
-}
+$LogPath = Join-Path $env:TEMP "RobloxStudioOldUI-install.log"
 
 function IsAdmin {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -29,62 +11,57 @@ function IsAdmin {
     return $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-function EnsureAdmin {
-    if (IsAdmin) {
-        Say "OK" "Running as Administrator." "Green"
-        return
-    }
-
-    # If we're already in the "second run", DO NOT try again (prevents spam loop)
-    if ($Elevated) {
-        throw "Still not Administrator after elevation attempt. Please open PowerShell as Admin and run again."
-    }
-
-    Say "INFO" "Requesting Administrator privileges..." "Cyan"
-
-    # When running via irm|iex, there is no file path. Save script to temp first.
-    $selfPath = $PSCommandPath
-    if ([string]::IsNullOrWhiteSpace($selfPath)) {
-        $selfPath = Join-Path $env:TEMP ("RobloxStudioOldUI_" + ([guid]::NewGuid().ToString("N")) + ".ps1")
-        $scriptText = $MyInvocation.MyCommand.Definition
-        Set-Content -Path $selfPath -Value $scriptText -Encoding UTF8
-        Say "INFO" "Saved script to temp: $selfPath" "Cyan"
-    }
-
-    # IMPORTANT: pass -Elevated so the elevated instance never re-prompts
-    Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$selfPath`" -Elevated"
-    exit
+function PauseExit {
+    Write-Host ""
+    Write-Host "Log saved to: $LogPath" -ForegroundColor DarkGray
+    Write-Host "Press ENTER to close..." -ForegroundColor DarkGray
+    [void](Read-Host)
 }
 
-function GetStudioFolder {
+try {
+    # Always log (transcript is the most reliable)
+    Start-Transcript -Path $LogPath -Force | Out-Null
+
+    Write-Host "[INFO] Starting Roblox Studio Classic UI setup..." -ForegroundColor Cyan
+
+    if (-not (IsAdmin)) {
+        Write-Host "[ERROR] This installer must be run as Administrator." -ForegroundColor Red
+        Write-Host "Open PowerShell as Admin, then run the install command from the README." -ForegroundColor Yellow
+        PauseExit
+        exit 1
+    }
+
+    # --- Find Roblox Studio folder ---
     $base = Join-Path $env:LOCALAPPDATA "Roblox\Versions"
-    if (-not (Test-Path $base)) { return $null }
+    $studioFolder = $null
 
-    $folders = Get-ChildItem -Path $base -Directory -ErrorAction SilentlyContinue |
-        Where-Object { Test-Path (Join-Path $_.FullName "RobloxStudioBeta.exe") }
-
-    if (-not $folders) { return $null }
-    return ($folders | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
-}
-
-function ApplyFlag {
-    $studio = GetStudioFolder
-    if (-not $studio) {
-        Say "WARN" "Roblox Studio not found under %LOCALAPPDATA%\Roblox\Versions (no RobloxStudioBeta.exe)." "Yellow"
-        return $false
+    if (Test-Path $base) {
+        $studioFolder = Get-ChildItem -Path $base -Directory -ErrorAction SilentlyContinue |
+            Where-Object { Test-Path (Join-Path $_.FullName "RobloxStudioBeta.exe") } |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1 |
+            Select-Object -ExpandProperty FullName
     }
 
-    $cs   = Join-Path $studio "ClientSettings"
-    $json = Join-Path $cs "ClientAppSettings.json"
+    if (-not $studioFolder) {
+        Write-Host "[WARN] Roblox Studio not found in %LOCALAPPDATA%\Roblox\Versions (no RobloxStudioBeta.exe)." -ForegroundColor Yellow
+        Write-Host "[WARN] Install/open Roblox Studio once, then run this installer again." -ForegroundColor Yellow
+    }
+    else {
+        $cs   = Join-Path $studioFolder "ClientSettings"
+        $json = Join-Path $cs "ClientAppSettings.json"
+        New-Item -Path $cs -ItemType Directory -Force | Out-Null
+        Set-Content -Path $json -Encoding UTF8 -Value '{ "FFlagEnableRibbonPlugin3": "false" }'
 
-    New-Item -Path $cs -ItemType Directory -Force | Out-Null
-    Set-Content -Path $json -Encoding UTF8 -Value '{ "FFlagEnableRibbonPlugin3": "false" }'
+        Write-Host "[SUCCESS] Wrote settings file:" -ForegroundColor Green
+        Write-Host "          $json"
+    }
 
-    Say "SUCCESS" "Wrote settings: $json" "Green"
-    return $true
-}
+    # --- Install fixer script (runs at logon) ---
+    $installDir = "C:\ProgramData\RobloxStudioTweaks"
+    $fixerPath  = Join-Path $installDir "DisableRibbonPlugin.ps1"
+    New-Item -Path $installDir -ItemType Directory -Force | Out-Null
 
-function InstallFixerScript($fixerPath) {
 @'
 $ErrorActionPreference = "SilentlyContinue"
 $base = Join-Path $env:LOCALAPPDATA "Roblox\Versions"
@@ -103,43 +80,31 @@ Set-Content -Path (Join-Path $cs "ClientAppSettings.json") -Encoding UTF8 -Value
 exit 0
 '@ | Set-Content -Path $fixerPath -Encoding UTF8
 
-    Say "SUCCESS" "Installed fixer: $fixerPath" "Green"
-}
+    Write-Host "[SUCCESS] Installed fixer script:" -ForegroundColor Green
+    Write-Host "          $fixerPath"
 
-function InstallTask($fixerPath) {
+    # --- Create scheduled task ---
     $taskName = "RobloxStudio - Disable Ribbon Plugin"
     $cmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$fixerPath`""
     schtasks /Create /F /SC ONLOGON /TN $taskName /TR $cmd | Out-Null
-    Say "SUCCESS" "Created Scheduled Task: $taskName" "Green"
-}
 
-# ---------------- MAIN ----------------
-try {
-    Remove-Item $LogPath -ErrorAction SilentlyContinue | Out-Null
-    Say "INFO" "Starting setup..." "Cyan"
+    Write-Host "[SUCCESS] Created Scheduled Task:" -ForegroundColor Green
+    Write-Host "          $taskName"
 
-    EnsureAdmin
+    # Run it once immediately
+    schtasks /Run /TN $taskName | Out-Null
+    Write-Host "[SUCCESS] Ran task once immediately." -ForegroundColor Green
 
-    $installDir = "C:\ProgramData\RobloxStudioTweaks"
-    $fixerPath  = Join-Path $installDir "DisableRibbonPlugin.ps1"
-    New-Item -Path $installDir -ItemType Directory -Force | Out-Null
-
-    InstallFixerScript $fixerPath
-    $applied = ApplyFlag
-    InstallTask $fixerPath
-
-    schtasks /Run /TN "RobloxStudio - Disable Ribbon Plugin" | Out-Null
-    Say "SUCCESS" "Ran task once now." "Green"
-
-    Say "SUCCESS" "Done!" "Green"
-    if (-not $applied) {
-        Say "WARN" "Roblox Studio not detected yet. It will apply once Studio is installed/opened." "Yellow"
-    }
+    Write-Host ""
+    Write-Host "[SUCCESS] Setup complete 🎉" -ForegroundColor Green
 
     PauseExit
 }
 catch {
-    Say "ERROR" $_.Exception.Message "Red"
+    Write-Host "[ERROR] $($_.Exception.Message)" -ForegroundColor Red
     PauseExit
     exit 1
+}
+finally {
+    try { Stop-Transcript | Out-Null } catch {}
 }
