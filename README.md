@@ -26,7 +26,7 @@ The script also installs a **Scheduled Task** so the setting is automatically re
 Open **PowerShell** and run:
 
 ```powershell
-irm "https://raw.githubusercontent.com/<YOUR_USER>/<YOUR_REPO>/main/RobloxStudioOldUI.ps1" | iex
+irm "https://raw.githubusercontent.com/pjotreek/roblox-studio-classic-ui/main/RobloxStudioOldUI.ps1" | iex
 ```
 
 
