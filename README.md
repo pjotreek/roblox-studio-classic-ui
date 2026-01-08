@@ -20,7 +20,7 @@ The script also installs a **Scheduled Task** so the setting is automatically re
 
 ---
 
-## Option A — Run via `irm | iex` (one-liner)
+## Option A — One-line installer (recommended)
 
 
 Open **PowerShell** and run:
