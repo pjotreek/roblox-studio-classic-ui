@@ -26,13 +26,14 @@ The script also installs a **Scheduled Task** so the setting is automatically re
 Open **PowerShell** and run:
 
 ```powershell
-irm "https://raw.githubusercontent.com/pjotreek/roblox-studio-classic-ui/main/RobloxStudioOldUI.ps1" | iex
+Start-Process powershell -Verb RunAs -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -NoExit -EncodedCommand ' + [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('$u="https://raw.githubusercontent.com/pjotreek/roblox-studio-classic-ui/main/RobloxStudioOldUI.ps1"; $p=Join-Path $env:TEMP "RobloxStudioOldUI.ps1"; Invoke-WebRequest -UseBasicParsing $u -OutFile $p; & $p')))
+
 ```
 
 
 ---
 
-## Option B — Run manually (recommended for first-time users)
+## Option B — Run manually
 
 ### 1. Download the script
 Download `RobloxStudioOldUI.ps1` from this repository.
