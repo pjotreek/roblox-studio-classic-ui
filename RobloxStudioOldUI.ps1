@@ -1,39 +1,37 @@
 # RobloxStudioOldUI.ps1
-# Disables the new-gen Roblox Studio UI and keeps the console open on success.
+# Disables new Roblox Studio UI by setting:
+# { "FFlagEnableRibbonPlugin3": "false" }
+# Installs a logon scheduled task and prints clear success messages.
 
 $ErrorActionPreference = "Stop"
 
-function Info($m)  { Write-Host "[INFO]    $m" -ForegroundColor Cyan }
-function Ok($m)    { Write-Host "[SUCCESS] $m" -ForegroundColor Green }
-function Warn($m)  { Write-Host "[WARN]    $m" -ForegroundColor Yellow }
-function Err($m)   { Write-Host "[ERROR]   $m" -ForegroundColor Red }
-
 function Pause-Exit {
     Write-Host ""
-    Write-Host "Press ENTER to close this window..." -ForegroundColor DarkGray
-    Read-Host | Out-Null
+    Write-Host "Press ENTER to close..." -ForegroundColor DarkGray
+    [void](Read-Host)
+}
+
+function Is-Admin {
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $p  = New-Object Security.Principal.WindowsPrincipal($id)
+    return $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
 function Ensure-Admin {
-    $isAdmin = ([Security.Principal.WindowsPrincipal]
-        [Security.Principal.WindowsIdentity]::GetCurrent()
-    ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if (Is-Admin) { return }
 
-    if ($isAdmin) { return }
+    Write-Host "[INFO] Requesting Administrator privileges..." -ForegroundColor Cyan
 
-    Info "Requesting Administrator privileges..."
-
+    # When running via irm|iex, there's no file path. Save to temp, then run elevated.
     $selfPath = $PSCommandPath
     if ([string]::IsNullOrWhiteSpace($selfPath)) {
-        $selfPath = Join-Path $env:TEMP ("RobloxStudioOldUI_" + [guid]::NewGuid() + ".ps1")
+        $selfPath = Join-Path $env:TEMP ("RobloxStudioOldUI_" + ([guid]::NewGuid().ToString("N")) + ".ps1")
         $scriptText = $MyInvocation.MyCommand.Definition
         Set-Content -Path $selfPath -Value $scriptText -Encoding UTF8
-        Info "Saved script to temporary file for elevation."
+        Write-Host "[INFO] Saved to temp for elevation: $selfPath" -ForegroundColor Cyan
     }
 
-    Start-Process powershell -Verb RunAs `
-        -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$selfPath`""
-
+    Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$selfPath`""
     exit
 }
 
@@ -41,58 +39,63 @@ function Get-StudioFolder {
     $base = Join-Path $env:LOCALAPPDATA "Roblox\Versions"
     if (-not (Test-Path $base)) { return $null }
 
-    Get-ChildItem $base -Directory |
-        Where-Object { Test-Path (Join-Path $_.FullName "RobloxStudioBeta.exe") } |
-        Sort-Object LastWriteTime -Descending |
-        Select-Object -First 1 |
-        Select-Object -ExpandProperty FullName
+    $folders = Get-ChildItem -Path $base -Directory -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path (Join-Path $_.FullName "RobloxStudioBeta.exe") }
+
+    if (-not $folders) { return $null }
+
+    return ($folders | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
 }
 
 function Apply-Flag {
     $studio = Get-StudioFolder
     if (-not $studio) {
-        Warn "Roblox Studio was not found. Install or open it once, then rerun."
+        Write-Host "[WARN] Roblox Studio not found in %LOCALAPPDATA%\Roblox\Versions (no RobloxStudioBeta.exe)." -ForegroundColor Yellow
         return $false
     }
 
     $cs = Join-Path $studio "ClientSettings"
     $json = Join-Path $cs "ClientAppSettings.json"
 
-    New-Item $cs -ItemType Directory -Force | Out-Null
-    '{ "FFlagEnableRibbonPlugin3": "false" }' |
-        Set-Content $json -Encoding UTF8
+    New-Item -Path $cs -ItemType Directory -Force | Out-Null
+    Set-Content -Path $json -Encoding UTF8 -Value '{ "FFlagEnableRibbonPlugin3": "false" }'
 
-    Ok "ClientAppSettings.json written successfully"
+    Write-Host "[SUCCESS] Wrote settings file:" -ForegroundColor Green
     Write-Host "          $json"
     return $true
 }
 
-function Install-FixerScript($path) {
+function Install-FixerScript {
+    param([Parameter(Mandatory=$true)][string]$FixerPath)
+
 @'
 $ErrorActionPreference = "SilentlyContinue"
 $base = Join-Path $env:LOCALAPPDATA "Roblox\Versions"
 if (-not (Test-Path $base)) { exit 0 }
 
-Get-ChildItem $base -Directory |
- Where-Object { Test-Path (Join-Path $_.FullName "RobloxStudioBeta.exe") } |
- Sort-Object LastWriteTime -Descending |
- Select-Object -First 1 |
- ForEach-Object {
-    $cs = Join-Path $_.FullName "ClientSettings"
-    New-Item $cs -ItemType Directory -Force | Out-Null
-    '{ "FFlagEnableRibbonPlugin3": "false" }' |
-        Set-Content (Join-Path $cs "ClientAppSettings.json") -Encoding UTF8
- }
-'@ | Set-Content $path -Encoding UTF8
+$target = Get-ChildItem -Path $base -Directory |
+  Where-Object { Test-Path (Join-Path $_.FullName "RobloxStudioBeta.exe") } |
+  Sort-Object LastWriteTime -Descending |
+  Select-Object -First 1
+
+if (-not $target) { exit 0 }
+
+$cs = Join-Path $target.FullName "ClientSettings"
+New-Item -Path $cs -ItemType Directory -Force | Out-Null
+Set-Content -Path (Join-Path $cs "ClientAppSettings.json") -Encoding UTF8 -Value '{ "FFlagEnableRibbonPlugin3": "false" }'
+exit 0
+'@ | Set-Content -Path $FixerPath -Encoding UTF8
 }
 
-function Install-Task($fixer) {
-    $name = "RobloxStudio - Disable Ribbon Plugin"
-    $cmd  = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$fixer`""
+function Install-Task {
+    param([Parameter(Mandatory=$true)][string]$FixerPath)
 
-    schtasks /Create /F /SC ONLOGON /TN $name /TR $cmd | Out-Null
-    Ok "Scheduled Task created successfully"
-    Write-Host "          $name"
+    $taskName = "RobloxStudio - Disable Ribbon Plugin"
+    $cmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$FixerPath`""
+    schtasks /Create /F /SC ONLOGON /TN $taskName /TR $cmd | Out-Null
+
+    Write-Host "[SUCCESS] Scheduled Task created:" -ForegroundColor Green
+    Write-Host "          $taskName"
 }
 
 # ---------------- MAIN ----------------
@@ -100,30 +103,31 @@ try {
     Ensure-Admin
 
     $installDir = "C:\ProgramData\RobloxStudioTweaks"
-    $fixer = Join-Path $installDir "DisableRibbonPlugin.ps1"
+    $fixerPath  = Join-Path $installDir "DisableRibbonPlugin.ps1"
 
-    New-Item $installDir -ItemType Directory -Force | Out-Null
-    Info "Using install directory: $installDir"
+    New-Item -Path $installDir -ItemType Directory -Force | Out-Null
+    Write-Host "[INFO] Install dir: $installDir" -ForegroundColor Cyan
 
-    Install-FixerScript $fixer
-    Ok "Fixer script installed"
+    Install-FixerScript -FixerPath $fixerPath
+    Write-Host "[SUCCESS] Fixer script installed:" -ForegroundColor Green
+    Write-Host "          $fixerPath"
 
     $applied = Apply-Flag
-    Install-Task $fixer
+    Install-Task -FixerPath $fixerPath
 
     schtasks /Run /TN "RobloxStudio - Disable Ribbon Plugin" | Out-Null
-    Ok "Startup task executed once immediately"
+    Write-Host "[SUCCESS] Ran task once immediately." -ForegroundColor Green
 
     Write-Host ""
-    Ok "Roblox Studio Classic UI setup completed successfully 🎉"
-
+    Write-Host "[SUCCESS] Completed setup!" -ForegroundColor Green
     if (-not $applied) {
-        Warn "The setting will apply automatically once Roblox Studio exists."
+        Write-Host "[WARN] Roblox Studio wasn't detected yet. It will apply once Studio is installed/opened." -ForegroundColor Yellow
     }
 
     Pause-Exit
 }
 catch {
-    Err $_.Exception.Message
+    Write-Host "[ERROR] $($_.Exception.Message)" -ForegroundColor Red
     Pause-Exit
+    exit 1
 }
